@@ -258,7 +258,7 @@ function summarize(detections: Detection[], hasCloth: boolean): Summary {
     return { level: "idle", band: null, spool: null, pct: null, text: "Tap the cloth to lock its color", speech: null, key: "idle" };
   }
   if (detections.length === 0) {
-    return { level: "searching", band: null, spool: null, pct: null, text: "Now show the thread spools", speech: null, key: "empty" };
+    return { level: "searching", band: null, spool: null, pct: null, text: "Now show the threads", speech: null, key: "empty" };
   }
 
   const top = detections.find((d) => d.isTop) ?? detections[0];
@@ -269,8 +269,8 @@ function summarize(detections: Detection[], hasCloth: boolean): Summary {
     band: top.band,
     spool: top.spool,
     pct,
-    text: `Closest match: spool ${top.spool}, ${pct}%`,
-    speech: `Spool ${top.spool} is the closest match: ${pct} percent.`,
+    text: `Closest match: thread ${top.spool}, ${pct}%`,
+    speech: `Thread ${top.spool} is the closest match: ${pct} percent.`,
     // Re-announce when the closest spool changes or moves to another 10% band.
     key: `top:${top.spool}:${top.band}`,
   };
@@ -361,7 +361,7 @@ function badgeVariants(d: Detection): BadgeSpec[] {
   const pct = `${d.isTop ? "★ " : ""}${Math.round(d.score)}%`;
   const style = bandBadgeStyle(d);
   return [
-    { lines: [pct, `SPOOL ${d.spool}`], style },
+    { lines: [pct, `THREAD ${d.spool}`], style },
     { lines: [pct], style },
   ];
 }
@@ -808,7 +808,7 @@ export default function CameraScanner() {
         clothRef.current = { lab, ...tap };
         announcerRef.current = freshAnnouncer();
         setClothCss(labToCssRgb(lab));
-        if (voiceRef.current) speak("Cloth color locked. Now show the thread spools.");
+        if (voiceRef.current) speak("Cloth color locked. Now show the threads.");
       }
     }
 
@@ -995,7 +995,7 @@ export default function CameraScanner() {
                 <span className="flex items-center gap-1.5 text-base font-bold uppercase tracking-wide text-white/75">
                   <StarIcon size={16} /> Closest match
                 </span>
-                <span className="text-2xl font-bold">Spool {summary.spool}</span>
+                <span className="text-2xl font-bold">Thread {summary.spool}</span>
               </span>
             </>
           ) : (

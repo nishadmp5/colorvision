@@ -2,7 +2,7 @@
   "id": "/",
   "name": "ColorVision — Thread Matcher",
   "short_name": "ColorVision",
-  "description": "Point your camera at cloth and thread spools to find the best matching thread color. Works offline.",
+  "description": "Point your camera at cloth and threads to find the best matching thread color. Works offline.",
   "lang": "en",
   "dir": "ltr",
   "start_url": "/",

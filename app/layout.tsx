@@ -19,7 +19,7 @@ const atkinson = Atkinson_Hyperlegible({
 export const metadata: Metadata = {
   title: "ColorVision — Thread Matcher",
   description:
-    "Point your camera at cloth and thread spools to find the best matching thread color. Works offline.",
+    "Point your camera at cloth and threads to find the best matching thread color. Works offline.",
   applicationName: "ColorVision",
   // PWA install metadata (public/manifest.json) and home-screen icons.
   manifest: "/manifest.json",

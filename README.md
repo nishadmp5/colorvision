@@ -1,18 +1,18 @@
 # ColorVision: Thread Matcher
 
-An offline, single-screen PWA that helps a color-blind tailor find the thread spool that matches a piece of cloth, using the phone's rear camera.
+An offline, single-screen PWA that helps a color-blind tailor find the thread that matches a piece of cloth, using the phone's rear camera.
 
 1. Point the camera at the cloth and **tap it**. The cloth color is locked.
-2. Show the spools. Each one is labeled live with **how many percent it matches** the cloth (e.g. "94% · SPOOL 2"), and its box and label are colored by 10% band:
+2. Show the threads. Each one is labeled live with **how many percent it matches** the cloth (e.g. "94% · THREAD 2"), and its box and label are colored by 10% band:
 
    | Band | 0–9 | 10–19 | 20–29 | 30–39 | 40–49 | 50–59 | 60–69 | 70–79 | 80–89 | 90–100 |
    |---|---|---|---|---|---|---|---|---|---|---|
    | Color | dark purple | purple | indigo | blue | teal | sea green | green | light green | lime | bright yellow |
 
-   The colors follow the *viridis* scale, which stays readable with color blindness: **brighter always means a closer match**, and box lines get thicker with each band. A color key sits above the buttons. The closest spool is marked **★**, and the top banner names it ("★ CLOSEST: SPOOL 2 — 94%").
-3. With **VOICE GUIDANCE** on, the closest spool is spoken aloud ("Spool 2 is the closest match: 94 percent"). This happens again whenever the closest spool changes or moves into another 10% band. The phone also vibrates: two short pulses when the closest spool scores 75% or more, one long pulse when it's under 50%.
+   The colors follow the *viridis* scale, which stays readable with color blindness: **brighter always means a closer match**, and box lines get thicker with each band. A color key sits above the buttons. The closest thread is marked **★**, and the top banner names it ("94% · ★ Closest match · Thread 2").
+3. With **VOICE GUIDANCE** on, the closest thread is spoken aloud ("Thread 2 is the closest match: 94 percent"). This happens again whenever the closest thread changes or moves into another 10% band. The phone also vibrates: two short pulses when the closest thread scores 75% or more, one long pulse when it's under 50%.
 
-Status is never shown by color alone: every spool shows its percentage as text, and line thickness and brightness rise with the match.
+Status is never shown by color alone: every thread shows its percentage as text, and line thickness and brightness rise with the match.
 
 The camera has its own area between the top and bottom bars, so nothing covers the picture. It asks for a **4:3** stream, the native shape of phone camera sensors, which gives the widest view. A 16:9 stream would crop the sensor. The video fills the area when that crops at most 25% of the frame; otherwise the whole frame is shown with thin black bars.
 
@@ -23,7 +23,7 @@ All processing happens on the device. There's no server, and after the first vis
 | Piece | File |
 |---|---|
 | Color math: sRGB → XYZ (D65) → CIELAB, CIEDE2000 (ΔE₀₀), score = 100·e^(−0.1·ΔE₀₀) | [utils/colorMath.ts](utils/colorMath.ts) |
-| Spool detection: OpenCV.js contour tree on L/a/b edges (background regions touching the frame edges are skipped), plus a pure-canvas fallback while OpenCV loads | [utils/spoolDetection.ts](utils/spoolDetection.ts) |
+| Thread detection: OpenCV.js contour tree on L/a/b edges (background regions touching the frame edges are skipped), plus a pure-canvas fallback while OpenCV loads | [utils/spoolDetection.ts](utils/spoolDetection.ts) |
 | OpenCV.js loader and typings | [utils/opencv.ts](utils/opencv.ts) |
 | Speech and vibration | [utils/feedback.ts](utils/feedback.ts) |
 | Camera (4:3, the sensor's full field of view), overlay, controls | [components/CameraScanner.tsx](components/CameraScanner.tsx), [components/Icons.tsx](components/Icons.tsx) |
@@ -58,6 +58,6 @@ Next 16 builds with Turbopack and the classic `next-pwa` plugin only works with 
 ## Known limitations
 
 - **Lighting changes colors.** Use even light; the 🔦 FLASH LIGHT button helps where the phone supports a torch (most Android phones; not iOS Safari).
-- **Background matters.** A spool that is nearly the same color as the surface it stands on has almost no visible outline, so it may not be detected. Stand spools on a plain, contrasting surface (a table or tray) and keep the cloth swatch in a separate part of the frame.
+- **Background matters.** A thread that is nearly the same color as the surface it stands on has almost no visible outline, so it may not be detected. Stand threads on a plain, contrasting surface (a table or tray) and keep the cloth swatch in a separate part of the frame.
 - Vibration isn't available on iOS. Speech works on iOS after VOICE GUIDANCE is switched on with a tap.
-- The detection thresholds (`DEFAULT_DETECTION_OPTIONS`) were tuned on synthetic scenes and should be re-checked with real spools and phones.
+- The detection thresholds (`DEFAULT_DETECTION_OPTIONS`) were tuned on synthetic scenes and should be re-checked with real threads and phones.
