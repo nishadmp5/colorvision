@@ -145,9 +145,18 @@ interface Summary {
   /** The closest spool and its rounded percentage; null before results. */
   spool: number | null;
   pct: number | null;
+  /** Up to three closest threads, best first (shown as tiles). */
+  ranking: RankedThread[];
   text: string;
   speech: string | null;
   key: string;
+}
+
+/** One entry of the top-3 tiles. */
+interface RankedThread {
+  spool: number;
+  pct: number;
+  band: number;
 }
 
 /** Mutable announcement bookkeeping (kept in a ref, not state). */
@@ -255,20 +264,43 @@ function stopStream(stream: MediaStream | null): void {
 /** Build the banner text, spoken text and announcement key for a frame. */
 function summarize(detections: Detection[], hasCloth: boolean): Summary {
   if (!hasCloth) {
-    return { level: "idle", band: null, spool: null, pct: null, text: "Tap the cloth to lock its color", speech: null, key: "idle" };
+    return {
+      level: "idle",
+      band: null,
+      spool: null,
+      pct: null,
+      ranking: [],
+      text: "Tap the cloth to lock its color",
+      speech: null,
+      key: "idle",
+    };
   }
   if (detections.length === 0) {
-    return { level: "searching", band: null, spool: null, pct: null, text: "Now show the threads", speech: null, key: "empty" };
+    return {
+      level: "searching",
+      band: null,
+      spool: null,
+      pct: null,
+      ranking: [],
+      text: "Now show the threads",
+      speech: null,
+      key: "empty",
+    };
   }
 
   const top = detections.find((d) => d.isTop) ?? detections[0];
   const pct = Math.round(top.score);
+  const ranking = [...detections]
+    .sort((a, b) => b.score - a.score)
+    .slice(0, 3)
+    .map((d) => ({ spool: d.spool, pct: Math.round(d.score), band: d.band }));
   return {
     // The level only picks the vibration pattern (best / no match).
     level: top.level,
     band: top.band,
     spool: top.spool,
     pct,
+    ranking,
     text: `Closest match: thread ${top.spool}, ${pct}%`,
     speech: `Thread ${top.spool} is the closest match: ${pct} percent.`,
     // Re-announce when the closest spool changes or moves to another 10% band.
@@ -347,8 +379,18 @@ function bandBadgeStyle(d: Detection): BadgeStyle {
   return { bg, fg, border: fg === COLORS.black ? COLORS.black : COLORS.white, fontPx: d.isTop ? 28 : 26 };
 }
 
-const BADGE_PAD_X = 10;
+const BADGE_PAD_X = 12;
 const BADGE_PAD_Y = 6;
+/** Lines after the first (e.g. "THREAD 2") are drawn smaller than the percentage. */
+const SECONDARY_LINE_SCALE = 0.68;
+
+/** Font size and line height of each line of a badge. */
+function badgeLineMetrics(spec: BadgeSpec): { px: number; lineH: number }[] {
+  return spec.lines.map((_, i) => {
+    const px = i === 0 ? spec.style.fontPx : Math.max(16, Math.round(spec.style.fontPx * SECONDARY_LINE_SCALE));
+    return { px, lineH: Math.round(px * 1.18) };
+  });
+}
 const BADGE_GAP = 6;
 
 /**
@@ -367,21 +409,26 @@ function badgeVariants(d: Detection): BadgeSpec[] {
 }
 
 function measureBadge(ctx: CanvasRenderingContext2D, spec: BadgeSpec, font: string) {
-  ctx.font = `700 ${spec.style.fontPx}px ${font}`;
-  const lineH = Math.round(spec.style.fontPx * 1.2);
-  const textW = Math.max(...spec.lines.map((l) => ctx.measureText(l).width));
-  return { w: Math.ceil(textW) + BADGE_PAD_X * 2, h: lineH * spec.lines.length + BADGE_PAD_Y * 2 };
+  const metrics = badgeLineMetrics(spec);
+  const textW = Math.max(
+    ...spec.lines.map((line, i) => {
+      ctx.font = `700 ${metrics[i].px}px ${font}`;
+      return ctx.measureText(line).width;
+    }),
+  );
+  const textH = metrics.reduce((sum, m) => sum + m.lineH, 0);
+  return { w: Math.ceil(textW) + BADGE_PAD_X * 2, h: textH + BADGE_PAD_Y * 2 };
 }
 
 function paintBadge(ctx: CanvasRenderingContext2D, r: ScreenRect, spec: BadgeSpec, font: string): void {
   const { style } = spec;
   ctx.setLineDash([]);
   ctx.beginPath();
-  ctx.roundRect(r.x, r.y, r.w, r.h, 14);
+  ctx.roundRect(r.x, r.y, r.w, r.h, Math.min(r.h / 2, 20));
   // Soft drop shadow lifts the label off the camera picture.
   ctx.save();
   ctx.shadowColor = "rgba(0,0,0,0.5)";
-  ctx.shadowBlur = 14;
+  ctx.shadowBlur = 16;
   ctx.shadowOffsetY = 4;
   ctx.fillStyle = style.bg;
   ctx.fill();
@@ -390,11 +437,14 @@ function paintBadge(ctx: CanvasRenderingContext2D, r: ScreenRect, spec: BadgeSpe
   ctx.lineWidth = 2;
   ctx.stroke();
 
-  ctx.font = `700 ${style.fontPx}px ${font}`;
   ctx.fillStyle = style.fg;
   ctx.textBaseline = "top";
-  const lineH = Math.round(style.fontPx * 1.2);
-  spec.lines.forEach((line, i) => ctx.fillText(line, r.x + BADGE_PAD_X, r.y + BADGE_PAD_Y + i * lineH + 1));
+  let y = r.y + BADGE_PAD_Y + 1;
+  badgeLineMetrics(spec).forEach(({ px, lineH }, i) => {
+    ctx.font = `700 ${px}px ${font}`;
+    ctx.fillText(spec.lines[i], r.x + BADGE_PAD_X, y + (lineH - px) / 2);
+    y += lineH;
+  });
 }
 
 const overlaps = (a: ScreenRect, b: ScreenRect, margin = 4): boolean =>
@@ -603,7 +653,7 @@ export default function CameraScanner() {
   const [ripples, setRipples] = useState<Ripple[]>([]);
   const [summary, setSummary] = useState<Omit<Summary, "speech" | "key">>(() => {
     const s = summarize([], false);
-    return { level: s.level, band: s.band, spool: s.spool, pct: s.pct, text: s.text };
+    return { level: s.level, band: s.band, spool: s.spool, pct: s.pct, ranking: s.ranking, text: s.text };
   });
 
   useEffect(() => {
@@ -837,10 +887,12 @@ export default function CameraScanner() {
     drawOverlay(detections, vw, vh, pw);
 
     const s = summarize(detections, cloth !== null);
+    // Only re-render when something visible changed.
+    const signature = (r: RankedThread[]) => r.map((t) => `${t.spool}:${t.pct}`).join(",");
     setSummary((prev) =>
-      prev.text === s.text && prev.band === s.band
+      prev.text === s.text && prev.band === s.band && signature(prev.ranking) === signature(s.ranking)
         ? prev
-        : { level: s.level, band: s.band, spool: s.spool, pct: s.pct, text: s.text },
+        : { level: s.level, band: s.band, spool: s.spool, pct: s.pct, ranking: s.ranking, text: s.text },
     );
     announce(s);
   }, [announce, drawOverlay]);
@@ -934,87 +986,98 @@ export default function CameraScanner() {
   /* ------------------------------ Render ------------------------------ */
 
   const locked = clothCss !== null;
-  const resultColor = summary.band !== null ? MATCH_BAND_COLORS[summary.band] : null;
-  const resultText = resultColor ? readableTextColor(resultColor) : null;
 
   return (
     <main
-      className="flex h-dvh w-full touch-manipulation select-none flex-col bg-black text-white"
+      className="cv-app flex h-dvh w-full touch-manipulation select-none flex-col text-white"
       data-engine={engine}
     >
-      {/* ---------------- Top bar: status, flash, live result ---------------- */}
-      <header className="flex flex-col gap-2 px-3 pb-2 pt-[max(0.5rem,env(safe-area-inset-top))]">
-        <div className="flex gap-2">
-          <div
-            role="status"
-            className={`flex min-h-16 flex-1 items-center gap-3 rounded-2xl px-4 text-xl font-bold leading-tight ring-2 ring-inset ${
-              locked ? "bg-white/[0.08] text-white ring-white/25" : "bg-cv-yellow/10 text-cv-yellow ring-cv-yellow"
-            }`}
-          >
-            {locked ? <LockIcon size={26} /> : <UnlockIcon size={26} />}
-            <span className="flex-1">{locked ? "CLOTH LOCKED" : "TAP THE CLOTH"}</span>
-            {locked && (
-              // The swatch is extra information; the text and lock icon carry the status.
-              <span
-                className="h-10 w-10 shrink-0 rounded-xl ring-2 ring-white"
-                style={{ backgroundColor: clothCss ?? undefined }}
-                aria-hidden="true"
-              />
-            )}
-          </div>
+      {/* The whole result in one sentence, for screen readers. The tiles below
+          change every few frames, so they aren't announced themselves. */}
+      <p aria-live="polite" className="sr-only">
+        {summary.text}
+      </p>
 
-          <button
-            type="button"
-            onClick={toggleTorch}
-            disabled={!torchSupported}
-            aria-pressed={torchSupported ? torchOn : undefined}
-            aria-label={torchSupported ? `Flash light ${torchOn ? "on" : "off"}` : "Flash light not available"}
-            className={`flex min-h-16 min-w-[96px] flex-col items-center justify-center gap-0.5 rounded-2xl px-3 text-base font-bold leading-none transition active:scale-95 disabled:opacity-45 ${
-              torchOn ? "bg-cv-yellow text-black" : "bg-white/[0.08] text-white ring-2 ring-inset ring-white/25"
-            }`}
-          >
-            {torchOn ? <FlashlightIcon size={26} /> : <FlashlightOffIcon size={26} />}
-            <span>FLASH {!torchSupported ? "N/A" : torchOn ? "ON" : "OFF"}</span>
-          </button>
-        </div>
-
-        {/* Live result card, read out by screen readers when it changes. */}
+      {/* ---------------- Top: status + flash ---------------- */}
+      <header className="flex gap-2 px-3 pb-2 pt-[max(0.5rem,env(safe-area-inset-top))]">
         <div
-          aria-live="polite"
-          className="flex min-h-16 items-center gap-3 rounded-2xl bg-white/[0.08] p-2 pr-4 ring-1 ring-inset ring-white/15"
+          role="status"
+          className={`flex min-h-16 flex-1 items-center gap-3 rounded-full pl-5 pr-2 text-xl font-bold leading-tight transition-colors duration-300 ${
+            locked ? "cv-glass text-white" : "bg-cv-yellow text-black"
+          }`}
         >
-          {resultColor && resultText ? (
-            <>
-              <span
-                className="flex h-14 min-w-[84px] shrink-0 items-center justify-center rounded-xl px-2 text-[28px] font-bold"
-                style={{ backgroundColor: resultColor, color: resultText }}
-              >
-                {summary.pct}%
-              </span>
-              <span className="flex flex-col leading-tight">
-                <span className="flex items-center gap-1.5 text-base font-bold uppercase tracking-wide text-white/75">
-                  <StarIcon size={16} /> Closest match
-                </span>
-                <span className="text-2xl font-bold">Thread {summary.spool}</span>
-              </span>
-            </>
-          ) : (
-            <>
-              <span
-                className={`flex h-14 w-14 shrink-0 items-center justify-center rounded-xl ${
-                  summary.level === "idle" ? "bg-cv-yellow text-black" : "bg-white/15 text-white"
-                }`}
-              >
-                {summary.level === "idle" ? <TargetIcon size={30} /> : <ScanIcon size={30} />}
-              </span>
-              <span className="text-xl font-bold leading-tight">{summary.text}</span>
-            </>
+          {locked ? <LockIcon size={26} /> : <UnlockIcon size={26} />}
+          <span className="flex-1">{locked ? "CLOTH LOCKED" : "TAP THE CLOTH"}</span>
+          {locked && (
+            // The swatch is extra information; the text and lock icon carry the status.
+            <span
+              className="h-12 w-12 shrink-0 rounded-full ring-[3px] ring-white"
+              style={{ backgroundColor: clothCss ?? undefined }}
+              aria-hidden="true"
+            />
           )}
         </div>
+
+        <button
+          type="button"
+          onClick={toggleTorch}
+          disabled={!torchSupported}
+          aria-pressed={torchSupported ? torchOn : undefined}
+          aria-label={torchSupported ? `Flash light ${torchOn ? "on" : "off"}` : "Flash light not available"}
+          className={`flex min-h-16 min-w-[92px] flex-col items-center justify-center gap-0.5 rounded-full px-4 text-base font-bold leading-none transition active:scale-95 disabled:opacity-40 ${
+            torchOn ? "bg-cv-yellow text-black" : "cv-glass text-white"
+          }`}
+        >
+          {torchOn ? <FlashlightIcon size={24} /> : <FlashlightOffIcon size={24} />}
+          <span>FLASH {!torchSupported ? "N/A" : torchOn ? "ON" : "OFF"}</span>
+        </button>
       </header>
 
-      {/* ---------------- Camera area: video + overlay, nothing on top ---------------- */}
-      <section className="relative mx-2 min-h-0 flex-1 overflow-hidden rounded-[28px] bg-neutral-950 ring-1 ring-white/10">
+      {/* ---------------- Results: top three threads, or the next step ---------------- */}
+      <div className="px-2 pb-1" aria-hidden="true">
+        {summary.ranking.length > 0 ? (
+          <ol className="flex gap-2.5 p-1">
+            {summary.ranking.map((t, i) => {
+              const color = MATCH_BAND_COLORS[t.band];
+              return (
+                // Each tile is filled with its band color. The closest thread
+                // also gets a ★ and a thick white ring, so it doesn't rely on color.
+                <li
+                  key={t.spool}
+                  className={`flex min-h-16 min-w-0 flex-1 flex-col items-center justify-center rounded-3xl px-1 leading-none transition-colors duration-300 ${
+                    i === 0 ? "ring-4 ring-white ring-offset-2 ring-offset-black" : "ring-1 ring-white/25"
+                  }`}
+                  style={{ backgroundColor: color, color: readableTextColor(color) }}
+                >
+                  <span className="flex items-center gap-1 text-[26px] font-bold tabular-nums">
+                    {i === 0 && <StarIcon size={20} />}
+                    {t.pct}%
+                  </span>
+                  <span className="mt-1 truncate text-base font-bold">Thread {t.spool}</span>
+                </li>
+              );
+            })}
+            {/* Keep the row's shape when fewer than three threads are in view. */}
+            {Array.from({ length: 3 - summary.ranking.length }, (_, i) => (
+              <li key={`empty-${i}`} className="min-h-16 flex-1 rounded-3xl border-2 border-dashed border-white/15" />
+            ))}
+          </ol>
+        ) : (
+          <div className="cv-glass m-1 flex min-h-16 items-center gap-3 rounded-3xl p-2 pr-5">
+            <span
+              className={`flex h-12 w-12 shrink-0 items-center justify-center rounded-full ${
+                summary.level === "idle" ? "bg-cv-yellow text-black" : "bg-white/15 text-white"
+              }`}
+            >
+              {summary.level === "idle" ? <TargetIcon size={28} /> : <ScanIcon size={28} />}
+            </span>
+            <span className="text-xl font-bold leading-tight">{summary.text}</span>
+          </div>
+        )}
+      </div>
+
+      {/* ---------------- Camera area: video + overlay ---------------- */}
+      <section className="relative mx-2 min-h-0 flex-1 overflow-hidden rounded-[32px] bg-neutral-950 shadow-[0_0_0_1px_rgba(255,255,255,0.1),0_12px_40px_rgba(0,0,0,0.6)]">
         {/* Live camera feed (decorative for screen readers: results are announced in text). */}
         <video
           ref={videoRef}
@@ -1036,6 +1099,18 @@ export default function CameraScanner() {
           onKeyDown={onOverlayKeyDown}
         />
 
+        {/* Until the cloth is locked: a hint floating over the picture (taps pass through). */}
+        {!locked && camera.kind === "running" && (
+          <div className="pointer-events-none absolute inset-x-0 bottom-5 flex justify-center px-4" aria-hidden="true">
+            <span className="flex items-center gap-3 rounded-full bg-black/60 px-5 py-3 text-xl font-bold text-white shadow-lg ring-1 ring-white/25 backdrop-blur-md">
+              <span className="cv-pulse flex h-9 w-9 items-center justify-center rounded-full bg-cv-yellow text-black">
+                <TargetIcon size={22} />
+              </span>
+              Tap on the cloth
+            </span>
+          </div>
+        )}
+
         {/* Tap ripples, removed when their animation ends. */}
         {ripples.map((r) => (
           <span
@@ -1048,28 +1123,33 @@ export default function CameraScanner() {
         ))}
       </section>
 
-      {/* ---------------- Bottom bar: color key, reset, voice ---------------- */}
-      <footer className="flex flex-col gap-2 px-3 pt-2 pb-[max(0.5rem,env(safe-area-inset-bottom))]">
+      {/* ---------------- Bottom: color key + actions ---------------- */}
+      <footer className="flex flex-col gap-2.5 px-3 pt-2.5 pb-[max(0.5rem,env(safe-area-inset-bottom))]">
         {/* Color key for the ten 10% bands: dark = far from the cloth color, bright = close. */}
         <div
-          className="flex items-center gap-2 text-base font-bold text-white/85"
+          className="flex items-center gap-2 px-1 text-base font-bold text-white/80"
           role="img"
           aria-label="Color key: dark purple means 0 percent match, bright yellow means 100 percent match."
         >
-          <span>0%</span>
-          <div className="flex h-4 flex-1 overflow-hidden rounded-full ring-1 ring-white/40">
+          <span className="tabular-nums">0%</span>
+          <div className="flex h-3 flex-1 gap-0.5">
             {MATCH_BAND_COLORS.map((color, band) => (
-              <span key={color} className="flex-1" style={{ backgroundColor: color }} title={matchBandLabel(band)} />
+              <span
+                key={color}
+                className="flex-1 first:rounded-l-full last:rounded-r-full"
+                style={{ backgroundColor: color }}
+                title={matchBandLabel(band)}
+              />
             ))}
           </div>
-          <span>100%</span>
+          <span className="tabular-nums">100%</span>
         </div>
 
         <div className="flex gap-2">
           <button
             type="button"
             onClick={resetCloth}
-            className="flex min-h-[76px] flex-[3] items-center justify-center gap-2 rounded-full bg-cv-yellow px-4 text-[22px] font-bold leading-tight text-black shadow-[0_6px_24px_rgba(255,215,0,0.25)] transition active:scale-[0.97]"
+            className="flex min-h-[76px] flex-[3] items-center justify-center gap-2.5 rounded-full bg-gradient-to-b from-[#FFE24D] to-cv-yellow px-4 text-[22px] font-bold leading-tight text-black shadow-[0_8px_28px_rgba(255,215,0,0.28)] transition active:scale-[0.97]"
           >
             <ResetIcon size={28} className="shrink-0" />
             <span>RESET CLOTH COLOR</span>
@@ -1079,7 +1159,7 @@ export default function CameraScanner() {
             onClick={toggleVoice}
             aria-pressed={voiceOn}
             className={`flex min-h-[76px] flex-[2] items-center justify-center gap-2 rounded-full px-3 font-bold leading-tight transition active:scale-[0.97] ${
-              voiceOn ? "bg-white text-black" : "bg-white/[0.08] text-white ring-2 ring-inset ring-white/25"
+              voiceOn ? "bg-white text-black" : "cv-glass text-white"
             }`}
           >
             {voiceOn ? <VolumeOnIcon size={28} className="shrink-0" /> : <VolumeOffIcon size={28} className="shrink-0" />}

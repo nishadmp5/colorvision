@@ -50,6 +50,37 @@ body {
   outline-offset: 3px;
 }
 
+/* App background: a faint warm glow at the top instead of flat black. */
+.cv-app {
+  background:
+    radial-gradient(120% 60% at 50% -10%, rgb(255 215 0 / 0.07), transparent 60%),
+    var(--cv-black);
+}
+
+/* Frosted "glass" surface for cards and secondary buttons. */
+.cv-glass {
+  background: linear-gradient(180deg, rgb(255 255 255 / 0.12), rgb(255 255 255 / 0.06));
+  box-shadow:
+    inset 0 0 0 1.5px rgb(255 255 255 / 0.18),
+    0 6px 20px rgb(0 0 0 / 0.35);
+  backdrop-filter: blur(12px);
+}
+
+/* Gentle pulse that draws the eye to the "Tap on the cloth" hint. */
+.cv-pulse {
+  animation: cv-pulse 1.6s ease-in-out infinite;
+}
+
+@keyframes cv-pulse {
+  0%,
+  100% {
+    box-shadow: 0 0 0 0 rgb(255 215 0 / 0.6);
+  }
+  50% {
+    box-shadow: 0 0 0 10px rgb(255 215 0 / 0);
+  }
+}
+
 /*
  * Tap ripple: confirms where the cloth was picked. A yellow ring with a
  * black halo stays visible on any fabric color.
@@ -81,6 +112,9 @@ body {
 
 /* Reduced motion: no growing ring, just a brief fixed one that fades out. */
 @media (prefers-reduced-motion: reduce) {
+  .cv-pulse {
+    animation: none;
+  }
   .cv-ripple {
     animation-name: cv-ripple-static;
   }

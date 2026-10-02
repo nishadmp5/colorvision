@@ -9,7 +9,7 @@ An offline, single-screen PWA that helps a color-blind tailor find the thread th
    |---|---|---|---|---|---|---|---|---|---|---|
    | Color | dark purple | purple | indigo | blue | teal | sea green | green | light green | lime | bright yellow |
 
-   The colors follow the *viridis* scale, which stays readable with color blindness: **brighter always means a closer match**, and box lines get thicker with each band. A color key sits above the buttons. The closest thread is marked **★**, and the top banner names it ("94% · ★ Closest match · Thread 2").
+   The colors follow the *viridis* scale, which stays readable with color blindness: **brighter always means a closer match**, and box lines get thicker with each band. A color key sits above the buttons. The closest thread is marked **★**. Above the camera, the **top three threads** are shown as colored tiles, best first, with the closest one ringed in white.
 3. With **VOICE GUIDANCE** on, the closest thread is spoken aloud ("Thread 2 is the closest match: 94 percent"). This happens again whenever the closest thread changes or moves into another 10% band. The phone also vibrates: two short pulses when the closest thread scores 75% or more, one long pulse when it's under 50%.
 
 Status is never shown by color alone: every thread shows its percentage as text, and line thickness and brightness rise with the match.
