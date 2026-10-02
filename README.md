@@ -14,6 +14,8 @@ An offline, single-screen PWA that helps a color-blind tailor find the thread sp
 
 Status is never shown by color alone: every spool shows its percentage as text, and line thickness and brightness rise with the match.
 
+The camera has its own area between the top and bottom bars, so nothing covers the picture. It asks for a **4:3** stream, the native shape of phone camera sensors, which gives the widest view. A 16:9 stream would crop the sensor. The video fills the area when that crops at most 25% of the frame; otherwise the whole frame is shown with thin black bars.
+
 All processing happens on the device. There's no server, and after the first visit the app works without a network.
 
 ## How it works
@@ -24,7 +26,7 @@ All processing happens on the device. There's no server, and after the first vis
 | Spool detection: OpenCV.js contour tree on L/a/b edges (background regions touching the frame edges are skipped), plus a pure-canvas fallback while OpenCV loads | [utils/spoolDetection.ts](utils/spoolDetection.ts) |
 | OpenCV.js loader and typings | [utils/opencv.ts](utils/opencv.ts) |
 | Speech and vibration | [utils/feedback.ts](utils/feedback.ts) |
-| Camera, overlay, controls | [components/CameraScanner.tsx](components/CameraScanner.tsx) |
+| Camera (4:3, the sensor's full field of view), overlay, controls | [components/CameraScanner.tsx](components/CameraScanner.tsx), [components/Icons.tsx](components/Icons.tsx) |
 | Offline service worker; its precache list is filled in after the build | [public/sw.js](public/sw.js), [scripts/generate-sw.mjs](scripts/generate-sw.mjs) |
 
 The band colors and the 50% / 75% vibration thresholds are in `utils/colorMath.ts` (`MATCH_BAND_COLORS`, `GOOD_MATCH_MIN_SCORE`, `BEST_MATCH_MIN_SCORE`).

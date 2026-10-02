@@ -3,14 +3,16 @@
 /**
  * CameraScanner: the single screen of ColorVision.
  *
- * ┌───────────────────────────────────────────────┐
- * │ [🔒 CLOTH LOCKED ■]            [🔦 FLASH LIGHT] │  top bar
- * │ [ ★ BEST MATCH: SPOOL 2 — 91% ]                │  live result (aria-live)
- * │                                               │
- * │        live rear camera  +  canvas overlay    │  tap = pick the cloth
- * │                                               │
- * │ [ ↺ RESET CLOTH COLOR ]      [🔊 VOICE GUIDANCE]│  bottom bar
- * └───────────────────────────────────────────────┘
+ * ┌───────────────────────────────────────────┐
+ * │ [🔒 CLOTH LOCKED ■]          [FLASH OFF] │  top bar
+ * │ [ 94% ] ★ CLOSEST MATCH · Spool 2        │  live result card (aria-live)
+ * │ ╭───────────────────────────────────────╮ │
+ * │ │  live rear camera (4:3) + overlay     │ │  camera area: no bars on top,
+ * │ │  tap = pick the cloth                 │ │  boxes colored by 10% band
+ * │ ╰───────────────────────────────────────╯ │
+ * │ 0% ▮▮▮▮▮▮▮▮▮▮ 100%                         │  color key
+ * │ ( ↺ RESET CLOTH COLOR )  ( 🔊 VOICE ON )  │  bottom bar
+ * └───────────────────────────────────────────┘
  *
  * Data flow, every PROCESS_INTERVAL_MS (300 ms):
  *   video frame → downscaled ImageData (~360 px wide)
@@ -20,10 +22,11 @@
  *     → speak / vibrate when a stable result changes
  *
  * Accessibility rules followed throughout:
- *   - Status is never shown by color alone: every state has its own icon
- *     (★ ✓ ✗), border style (solid / dashed / thin) and words.
- *   - Touch targets are ≥ 72 px tall, with 20–28 px bold text.
- *   - The palette is only black, white, #FFD700, #00FF00, #FF0000 and a muted gray.
+ *   - Match level is never shown by color alone: every spool shows its
+ *     percentage as text, and box lines get thicker and brighter (viridis
+ *     scale) with each 10% band. Controls always have text next to their icon.
+ *   - Touch targets are ≥ 64 px tall, with 20–28 px bold text.
+ *   - UI chrome uses black, white, #FFD700 and #FF0000; match bands use viridis.
  *
  * This component touches `window`, `navigator.mediaDevices` and the canvas,
  * so it is client-only. `app/page.tsx` loads it with `ssr: false`.
@@ -52,6 +55,20 @@ import {
   vibrate,
 } from "@/utils/feedback";
 import { waitForOpenCv, type OpenCV } from "@/utils/opencv";
+import {
+  AlertIcon,
+  CameraIcon,
+  FlashlightIcon,
+  FlashlightOffIcon,
+  LockIcon,
+  ResetIcon,
+  ScanIcon,
+  StarIcon,
+  TargetIcon,
+  UnlockIcon,
+  VolumeOffIcon,
+  VolumeOnIcon,
+} from "@/components/Icons";
 import {
   PROCESSING_WIDTH,
   detectRegionsCanvas,
@@ -125,6 +142,9 @@ interface Summary {
   level: SummaryLevel;
   /** Match band of the closest spool (sets the banner color); null before results. */
   band: number | null;
+  /** The closest spool and its rounded percentage; null before results. */
+  spool: number | null;
+  pct: number | null;
   text: string;
   speech: string | null;
   key: string;
@@ -138,39 +158,57 @@ interface AnnouncerState {
   lastAt: number;
 }
 
-/** Maps video pixels to screen pixels for an `object-fit: cover` video. */
-interface CoverTransform {
+/** Maps video pixels to screen pixels, plus the CSS `object-fit` that matches it. */
+interface FitTransform {
   scale: number;
   dx: number;
   dy: number;
+  mode: "cover" | "contain";
 }
 
 /* -------------------------------------------------------------------------- */
 /*                               Pure helpers                                 */
 /* -------------------------------------------------------------------------- */
 
+/** Largest share of the camera frame "cover" may crop away before we show the whole frame instead. */
+const MAX_COVER_CROP = 0.25;
+
 /**
- * `object-fit: cover` scales the video until it fills the element, cropping
- * the overflow evenly on both sides. Reproducing that math lets us draw
- * boxes exactly over the objects and map taps back into the video frame.
+ * Fit the camera frame into the camera area.
+ *   - "cover" fills the area edge to edge and crops the overflow.
+ *   - "contain" shows the entire frame, with thin black bars.
+ * Cover is used when it crops at most 25% of the frame (a 4:3 portrait
+ * stream loses under 10% on a tall phone, ~23% on a small one). Otherwise contain is used,
+ * so a big part of what the camera sees is never hidden (e.g. a landscape
+ * webcam in a portrait window). The same math draws the boxes exactly over
+ * the objects and maps taps back into the video frame.
  */
-function coverTransform(cw: number, ch: number, vw: number, vh: number): CoverTransform {
-  const scale = Math.max(cw / vw, ch / vh);
-  return { scale, dx: (cw - vw * scale) / 2, dy: (ch - vh * scale) / 2 };
+function fitTransform(cw: number, ch: number, vw: number, vh: number): FitTransform {
+  const cover = Math.max(cw / vw, ch / vh);
+  const contain = Math.min(cw / vw, ch / vh);
+  const visibleShare = (cw * ch) / (vw * vh * cover * cover);
+  const mode = 1 - visibleShare <= MAX_COVER_CROP ? "cover" : "contain";
+  const scale = mode === "cover" ? cover : contain;
+  return { scale, dx: (cw - vw * scale) / 2, dy: (ch - vh * scale) / 2, mode };
 }
 
 /**
- * Open the rear camera at ~1080p, stepping down the constraints when the
- * device can't satisfy them (e.g. laptops only have a front camera):
- * exact rear camera → preferred rear camera → any camera.
+ * Open the rear camera at 1080p in **4:3**, stepping down the constraints
+ * when the device can't satisfy them (e.g. laptops only have a front
+ * camera): exact rear camera → preferred rear camera → any camera.
+ *
+ * 4:3 is the native shape of phone camera sensors, so it gives the widest
+ * field of view. A 16:9 stream crops the top and bottom of the sensor
+ * (about 25% of the picture).
  */
 async function openCamera(): Promise<MediaStream> {
   if (!window.isSecureContext || !navigator.mediaDevices?.getUserMedia) {
     throw new DOMException("Camera needs HTTPS", "SecurityError");
   }
   const resolution: MediaTrackConstraints = {
-    width: { ideal: 1920 },
+    width: { ideal: 1440 },
     height: { ideal: 1080 },
+    aspectRatio: { ideal: 4 / 3 },
   };
   const attempts: MediaTrackConstraints[] = [
     { ...resolution, facingMode: { exact: "environment" } },
@@ -217,10 +255,10 @@ function stopStream(stream: MediaStream | null): void {
 /** Build the banner text, spoken text and announcement key for a frame. */
 function summarize(detections: Detection[], hasCloth: boolean): Summary {
   if (!hasCloth) {
-    return { level: "idle", band: null, text: "👆 POINT AT THE CLOTH AND TAP IT", speech: null, key: "idle" };
+    return { level: "idle", band: null, spool: null, pct: null, text: "Tap the cloth to lock its color", speech: null, key: "idle" };
   }
   if (detections.length === 0) {
-    return { level: "searching", band: null, text: "🧵 NOW SHOW THE THREAD SPOOLS", speech: null, key: "empty" };
+    return { level: "searching", band: null, spool: null, pct: null, text: "Now show the thread spools", speech: null, key: "empty" };
   }
 
   const top = detections.find((d) => d.isTop) ?? detections[0];
@@ -229,7 +267,9 @@ function summarize(detections: Detection[], hasCloth: boolean): Summary {
     // The level only picks the vibration pattern (best / no match).
     level: top.level,
     band: top.band,
-    text: `★ CLOSEST: SPOOL ${top.spool} — ${pct}%`,
+    spool: top.spool,
+    pct,
+    text: `Closest match: spool ${top.spool}, ${pct}%`,
     speech: `Spool ${top.spool} is the closest match: ${pct} percent.`,
     // Re-announce when the closest spool changes or moves to another 10% band.
     key: `top:${top.spool}:${top.band}`,
@@ -336,12 +376,18 @@ function measureBadge(ctx: CanvasRenderingContext2D, spec: BadgeSpec, font: stri
 function paintBadge(ctx: CanvasRenderingContext2D, r: ScreenRect, spec: BadgeSpec, font: string): void {
   const { style } = spec;
   ctx.setLineDash([]);
-  ctx.fillStyle = style.bg;
-  ctx.strokeStyle = style.border;
-  ctx.lineWidth = 3;
   ctx.beginPath();
-  ctx.roundRect(r.x, r.y, r.w, r.h, 8);
+  ctx.roundRect(r.x, r.y, r.w, r.h, 14);
+  // Soft drop shadow lifts the label off the camera picture.
+  ctx.save();
+  ctx.shadowColor = "rgba(0,0,0,0.5)";
+  ctx.shadowBlur = 14;
+  ctx.shadowOffsetY = 4;
+  ctx.fillStyle = style.bg;
   ctx.fill();
+  ctx.restore();
+  ctx.strokeStyle = style.border;
+  ctx.lineWidth = 2;
   ctx.stroke();
 
   ctx.font = `700 ${style.fontPx}px ${font}`;
@@ -453,13 +499,18 @@ function drawDetectionBox(ctx: CanvasRenderingContext2D, d: Detection, r: Screen
   const width = 3 + d.band;
   const outline = readableTextColor(color) === COLORS.black ? COLORS.black : COLORS.white;
 
+  const radius = Math.min(16, r.w / 4, r.h / 4);
+
   ctx.setLineDash([]);
+  ctx.lineJoin = "round";
+  ctx.beginPath();
+  ctx.roundRect(r.x, r.y, r.w, r.h, radius);
   ctx.strokeStyle = outline;
   ctx.lineWidth = width + 4;
-  ctx.strokeRect(r.x, r.y, r.w, r.h);
+  ctx.stroke();
   ctx.strokeStyle = color;
   ctx.lineWidth = width;
-  ctx.strokeRect(r.x, r.y, r.w, r.h);
+  ctx.stroke();
 }
 
 const CLOTH_RING_RADIUS = 26;
@@ -527,8 +578,6 @@ export default function CameraScanner() {
   // --- DOM refs ---------------------------------------------------------
   const videoRef = useRef<HTMLVideoElement>(null);
   const overlayRef = useRef<HTMLCanvasElement>(null);
-  const headerRef = useRef<HTMLElement>(null);
-  const footerRef = useRef<HTMLElement>(null);
   /** Offscreen canvas for reading downscaled frame pixels. */
   const procCanvasRef = useRef<HTMLCanvasElement | null>(null);
 
@@ -552,9 +601,9 @@ export default function CameraScanner() {
   const [voiceOn, setVoiceOn] = useState<boolean>(loadVoicePreference);
   const [clothCss, setClothCss] = useState<string | null>(null);
   const [ripples, setRipples] = useState<Ripple[]>([]);
-  const [summary, setSummary] = useState<Pick<Summary, "level" | "band" | "text">>(() => {
+  const [summary, setSummary] = useState<Omit<Summary, "speech" | "key">>(() => {
     const s = summarize([], false);
-    return { level: s.level, band: s.band, text: s.text };
+    return { level: s.level, band: s.band, spool: s.spool, pct: s.pct, text: s.text };
   });
 
   useEffect(() => {
@@ -702,16 +751,14 @@ export default function CameraScanner() {
       ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
       ctx.clearRect(0, 0, cssW, cssH);
 
-      const t = coverTransform(cssW, cssH, vw, vh);
+      const t = fitTransform(cssW, cssH, vw, vh);
       const k = (vw / pw) * t.scale; // processing px → screen px
+      // Keep the video's CSS fit in sync with the transform used for drawing.
+      const video = videoRef.current;
+      if (video && video.style.objectFit !== t.mode) video.style.objectFit = t.mode;
 
-      // Labels must stay in the strip between the top and bottom bars.
-      const canvasTop = canvas.getBoundingClientRect().top;
-      const bounds: DrawBounds = {
-        width: cssW,
-        top: (headerRef.current?.getBoundingClientRect().bottom ?? canvasTop) - canvasTop,
-        bottom: (footerRef.current?.getBoundingClientRect().top ?? canvasTop + cssH) - canvasTop,
-      };
+      // The camera area has no bars on top of it, so labels can use all of it.
+      const bounds: DrawBounds = { width: cssW, top: 0, bottom: cssH };
 
       const items = detections.map((d) => ({
         d,
@@ -791,7 +838,9 @@ export default function CameraScanner() {
 
     const s = summarize(detections, cloth !== null);
     setSummary((prev) =>
-      prev.text === s.text && prev.band === s.band ? prev : { level: s.level, band: s.band, text: s.text },
+      prev.text === s.text && prev.band === s.band
+        ? prev
+        : { level: s.level, band: s.band, spool: s.spool, pct: s.pct, text: s.text },
     );
     announce(s);
   }, [announce, drawOverlay]);
@@ -825,9 +874,11 @@ export default function CameraScanner() {
     const canvas = overlayRef.current;
     if (!video || !canvas || !video.videoWidth) return;
 
-    const t = coverTransform(canvas.clientWidth, canvas.clientHeight, video.videoWidth, video.videoHeight);
-    const u = Math.min(1, Math.max(0, (sx - t.dx) / t.scale / video.videoWidth));
-    const v = Math.min(1, Math.max(0, (sy - t.dy) / t.scale / video.videoHeight));
+    const t = fitTransform(canvas.clientWidth, canvas.clientHeight, video.videoWidth, video.videoHeight);
+    const u = (sx - t.dx) / t.scale / video.videoWidth;
+    const v = (sy - t.dy) / t.scale / video.videoHeight;
+    // A tap on the black bars around a "contain" frame isn't on the cloth.
+    if (u < 0 || u > 1 || v < 0 || v > 1) return;
     pendingTapRef.current = { u, v };
 
     const id = ++rippleIdRef.current;
@@ -883,88 +934,32 @@ export default function CameraScanner() {
   /* ------------------------------ Render ------------------------------ */
 
   const locked = clothCss !== null;
-
-  // Before results the banner gives instructions; afterwards it takes the
-  // closest spool's band color (with black or white text for contrast).
-  const bannerClass =
-    summary.band !== null
-      ? ""
-      : summary.level === "idle"
-        ? "border-cv-yellow bg-black text-cv-yellow"
-        : "border-white border-dashed bg-black text-white";
-  const bannerStyle =
-    summary.band !== null
-      ? (() => {
-          const bg = MATCH_BAND_COLORS[summary.band];
-          const fg = readableTextColor(bg);
-          return { backgroundColor: bg, color: fg, borderColor: fg };
-        })()
-      : undefined;
+  const resultColor = summary.band !== null ? MATCH_BAND_COLORS[summary.band] : null;
+  const resultText = resultColor ? readableTextColor(resultColor) : null;
 
   return (
     <main
-      className="relative h-dvh w-full touch-manipulation select-none overflow-hidden bg-black"
+      className="flex h-dvh w-full touch-manipulation select-none flex-col bg-black text-white"
       data-engine={engine}
     >
-      {/* Live camera feed (decorative for screen readers: results are announced in text). */}
-      <video
-        ref={videoRef}
-        className="absolute inset-0 h-full w-full object-cover"
-        playsInline
-        muted
-        autoPlay
-        aria-hidden="true"
-      />
-
-      {/* Overlay: detection boxes, badges and the cloth target. Tapping it picks the cloth. */}
-      <canvas
-        ref={overlayRef}
-        className="absolute inset-0 h-full w-full cursor-crosshair"
-        role="button"
-        tabIndex={0}
-        aria-label="Camera view. Tap on the cloth to lock its color."
-        onPointerDown={onOverlayPointerDown}
-        onKeyDown={onOverlayKeyDown}
-      />
-
-      {/* Tap ripples, removed when their animation ends. */}
-      {ripples.map((r) => (
-        <span
-          key={r.id}
-          className="cv-ripple"
-          style={{ left: r.x, top: r.y }}
-          aria-hidden="true"
-          onAnimationEnd={() => setRipples((rs) => rs.filter((x) => x.id !== r.id))}
-        />
-      ))}
-
       {/* ---------------- Top bar: status, flash, live result ---------------- */}
-      <header
-        ref={headerRef}
-        className="absolute inset-x-0 top-0 z-10 flex flex-col gap-3 bg-black/85 px-3 pb-3 pt-[max(0.75rem,env(safe-area-inset-top))]">
-        <div className="flex gap-3">
+      <header className="flex flex-col gap-2 px-3 pb-2 pt-[max(0.5rem,env(safe-area-inset-top))]">
+        <div className="flex gap-2">
           <div
             role="status"
-            className={`flex min-h-[72px] flex-1 items-center gap-3 rounded-2xl border-4 px-3 text-xl font-bold leading-tight ${
-              locked ? "border-white text-white" : "border-cv-yellow text-cv-yellow"
+            className={`flex min-h-16 flex-1 items-center gap-3 rounded-2xl px-4 text-xl font-bold leading-tight ring-2 ring-inset ${
+              locked ? "bg-white/[0.08] text-white ring-white/25" : "bg-cv-yellow/10 text-cv-yellow ring-cv-yellow"
             }`}
           >
-            {locked ? (
-              <>
-                <span aria-hidden="true">🔒</span>
-                <span className="flex-1">CLOTH LOCKED</span>
-                {/* The swatch is extra information; the text and lock icon carry the status. */}
-                <span
-                  className="h-11 w-11 shrink-0 rounded-lg border-4 border-white"
-                  style={{ backgroundColor: clothCss ?? undefined }}
-                  aria-hidden="true"
-                />
-              </>
-            ) : (
-              <>
-                <span aria-hidden="true">🔓</span>
-                <span>TAP THE CLOTH</span>
-              </>
+            {locked ? <LockIcon size={26} /> : <UnlockIcon size={26} />}
+            <span className="flex-1">{locked ? "CLOTH LOCKED" : "TAP THE CLOTH"}</span>
+            {locked && (
+              // The swatch is extra information; the text and lock icon carry the status.
+              <span
+                className="h-10 w-10 shrink-0 rounded-xl ring-2 ring-white"
+                style={{ backgroundColor: clothCss ?? undefined }}
+                aria-hidden="true"
+              />
             )}
           </div>
 
@@ -974,78 +969,136 @@ export default function CameraScanner() {
             disabled={!torchSupported}
             aria-pressed={torchSupported ? torchOn : undefined}
             aria-label={torchSupported ? `Flash light ${torchOn ? "on" : "off"}` : "Flash light not available"}
-            className={`flex min-h-[72px] min-w-[112px] flex-col items-center justify-center rounded-2xl border-4 px-2 text-lg font-bold leading-tight transition-transform active:scale-95 ${
-              !torchSupported
-                ? "border-cv-gray text-cv-gray"
-                : torchOn
-                  ? "border-cv-yellow bg-cv-yellow text-black"
-                  : "border-white bg-black text-white"
+            className={`flex min-h-16 min-w-[96px] flex-col items-center justify-center gap-0.5 rounded-2xl px-3 text-base font-bold leading-none transition active:scale-95 disabled:opacity-45 ${
+              torchOn ? "bg-cv-yellow text-black" : "bg-white/[0.08] text-white ring-2 ring-inset ring-white/25"
             }`}
           >
-            <span>🔦 FLASH LIGHT</span>
-            <span className="text-base">{!torchSupported ? "N/A" : torchOn ? "ON" : "OFF"}</span>
+            {torchOn ? <FlashlightIcon size={26} /> : <FlashlightOffIcon size={26} />}
+            <span>FLASH {!torchSupported ? "N/A" : torchOn ? "ON" : "OFF"}</span>
           </button>
         </div>
 
-        <p
+        {/* Live result card, read out by screen readers when it changes. */}
+        <div
           aria-live="polite"
-          className={`rounded-2xl border-4 px-4 py-3 text-center text-2xl font-bold leading-tight ${bannerClass}`}
-          style={bannerStyle}
+          className="flex min-h-16 items-center gap-3 rounded-2xl bg-white/[0.08] p-2 pr-4 ring-1 ring-inset ring-white/15"
         >
-          {summary.text}
-        </p>
+          {resultColor && resultText ? (
+            <>
+              <span
+                className="flex h-14 min-w-[84px] shrink-0 items-center justify-center rounded-xl px-2 text-[28px] font-bold"
+                style={{ backgroundColor: resultColor, color: resultText }}
+              >
+                {summary.pct}%
+              </span>
+              <span className="flex flex-col leading-tight">
+                <span className="flex items-center gap-1.5 text-base font-bold uppercase tracking-wide text-white/75">
+                  <StarIcon size={16} /> Closest match
+                </span>
+                <span className="text-2xl font-bold">Spool {summary.spool}</span>
+              </span>
+            </>
+          ) : (
+            <>
+              <span
+                className={`flex h-14 w-14 shrink-0 items-center justify-center rounded-xl ${
+                  summary.level === "idle" ? "bg-cv-yellow text-black" : "bg-white/15 text-white"
+                }`}
+              >
+                {summary.level === "idle" ? <TargetIcon size={30} /> : <ScanIcon size={30} />}
+              </span>
+              <span className="text-xl font-bold leading-tight">{summary.text}</span>
+            </>
+          )}
+        </div>
       </header>
 
-      {/* ---------------- Bottom bar: reset + voice ---------------- */}
-      <footer
-        ref={footerRef}
-        className="absolute inset-x-0 bottom-0 z-10 flex flex-col gap-3 bg-black/85 px-3 pt-3 pb-[max(0.75rem,env(safe-area-inset-bottom))]">
+      {/* ---------------- Camera area: video + overlay, nothing on top ---------------- */}
+      <section className="relative mx-2 min-h-0 flex-1 overflow-hidden rounded-[28px] bg-neutral-950 ring-1 ring-white/10">
+        {/* Live camera feed (decorative for screen readers: results are announced in text). */}
+        <video
+          ref={videoRef}
+          className="absolute inset-0 h-full w-full object-cover"
+          playsInline
+          muted
+          autoPlay
+          aria-hidden="true"
+        />
+
+        {/* Overlay: detection boxes, badges and the cloth target. Tapping it picks the cloth. */}
+        <canvas
+          ref={overlayRef}
+          className="absolute inset-0 h-full w-full cursor-crosshair"
+          role="button"
+          tabIndex={0}
+          aria-label="Camera view. Tap on the cloth to lock its color."
+          onPointerDown={onOverlayPointerDown}
+          onKeyDown={onOverlayKeyDown}
+        />
+
+        {/* Tap ripples, removed when their animation ends. */}
+        {ripples.map((r) => (
+          <span
+            key={r.id}
+            className="cv-ripple"
+            style={{ left: r.x, top: r.y }}
+            aria-hidden="true"
+            onAnimationEnd={() => setRipples((rs) => rs.filter((x) => x.id !== r.id))}
+          />
+        ))}
+      </section>
+
+      {/* ---------------- Bottom bar: color key, reset, voice ---------------- */}
+      <footer className="flex flex-col gap-2 px-3 pt-2 pb-[max(0.5rem,env(safe-area-inset-bottom))]">
         {/* Color key for the ten 10% bands: dark = far from the cloth color, bright = close. */}
         <div
-          className="flex items-center gap-2 text-lg font-bold text-white"
+          className="flex items-center gap-2 text-base font-bold text-white/85"
           role="img"
           aria-label="Color key: dark purple means 0 percent match, bright yellow means 100 percent match."
         >
           <span>0%</span>
-          <div className="flex h-7 flex-1 overflow-hidden rounded-md border-2 border-white">
+          <div className="flex h-4 flex-1 overflow-hidden rounded-full ring-1 ring-white/40">
             {MATCH_BAND_COLORS.map((color, band) => (
-              <span
-                key={color}
-                className="flex-1"
-                style={{ backgroundColor: color }}
-                title={matchBandLabel(band)}
-              />
+              <span key={color} className="flex-1" style={{ backgroundColor: color }} title={matchBandLabel(band)} />
             ))}
           </div>
           <span>100%</span>
         </div>
-        <div className="flex gap-3">
+
+        <div className="flex gap-2">
           <button
             type="button"
             onClick={resetCloth}
-            className="min-h-[96px] flex-[3] rounded-2xl border-4 border-white bg-cv-yellow px-3 text-[26px] font-bold leading-tight text-black transition-transform active:scale-95"
+            className="flex min-h-[76px] flex-[3] items-center justify-center gap-2 rounded-full bg-cv-yellow px-4 text-[22px] font-bold leading-tight text-black shadow-[0_6px_24px_rgba(255,215,0,0.25)] transition active:scale-[0.97]"
           >
-            ↺ RESET CLOTH COLOR
+            <ResetIcon size={28} className="shrink-0" />
+            <span>RESET CLOTH COLOR</span>
           </button>
           <button
             type="button"
             onClick={toggleVoice}
             aria-pressed={voiceOn}
-            className={`flex min-h-[96px] flex-[2] flex-col items-center justify-center rounded-2xl border-4 border-white px-2 text-xl font-bold leading-tight transition-transform active:scale-95 ${
-              voiceOn ? "bg-white text-black" : "bg-black text-white"
+            className={`flex min-h-[76px] flex-[2] items-center justify-center gap-2 rounded-full px-3 font-bold leading-tight transition active:scale-[0.97] ${
+              voiceOn ? "bg-white text-black" : "bg-white/[0.08] text-white ring-2 ring-inset ring-white/25"
             }`}
           >
-            <span>{voiceOn ? "🔊" : "🔇"} VOICE GUIDANCE</span>
-            <span className="text-lg">{voiceOn ? "ON" : "OFF"}</span>
+            {voiceOn ? <VolumeOnIcon size={28} className="shrink-0" /> : <VolumeOffIcon size={28} className="shrink-0" />}
+            <span className="flex flex-col items-start text-left">
+              <span className="text-base">VOICE GUIDANCE</span>
+              <span className="text-xl">{voiceOn ? "ON" : "OFF"}</span>
+            </span>
           </button>
         </div>
       </footer>
 
       {/* ---------------- Camera starting / error screens ---------------- */}
       {camera.kind === "starting" && (
-        <div className="absolute inset-0 z-20 flex items-center justify-center bg-black p-6 text-center">
-          <p className="text-4xl font-bold text-white" role="status">
-            📷 STARTING CAMERA…
+        <div className="fixed inset-0 z-20 flex flex-col items-center justify-center gap-5 bg-black p-6 text-center">
+          <span className="flex h-24 w-24 items-center justify-center rounded-full bg-white/10 text-white">
+            <CameraIcon size={48} />
+          </span>
+          <p className="text-3xl font-bold text-white" role="status">
+            Starting camera…
           </p>
         </div>
       )}
@@ -1055,22 +1108,28 @@ export default function CameraScanner() {
           role="alertdialog"
           aria-labelledby="camera-error-title"
           aria-describedby="camera-error-text"
-          className="absolute inset-0 z-20 flex flex-col items-center justify-center gap-8 bg-black p-6 text-center"
+          className="fixed inset-0 z-20 flex items-center justify-center bg-black p-5"
         >
-          <p id="camera-error-title" className="text-4xl font-bold text-cv-red">
-            ✗ CAMERA PROBLEM
-          </p>
-          <p id="camera-error-text" className="max-w-md text-2xl font-bold leading-snug text-white">
-            {camera.message}
-          </p>
-          <button
-            type="button"
-            onClick={retryCamera}
-            autoFocus
-            className="min-h-[96px] w-full max-w-md rounded-2xl border-4 border-white bg-cv-yellow text-3xl font-bold text-black active:scale-95"
-          >
-            ↻ TRY AGAIN
-          </button>
+          <div className="flex w-full max-w-md flex-col items-center gap-6 rounded-[28px] bg-white/[0.06] p-6 text-center ring-1 ring-white/15">
+            <span className="flex h-20 w-20 items-center justify-center rounded-full bg-cv-red text-white">
+              <AlertIcon size={40} />
+            </span>
+            <p id="camera-error-title" className="text-3xl font-bold text-white">
+              Camera problem
+            </p>
+            <p id="camera-error-text" className="text-xl font-bold leading-snug text-white/90">
+              {camera.message}
+            </p>
+            <button
+              type="button"
+              onClick={retryCamera}
+              autoFocus
+              className="flex min-h-[76px] w-full items-center justify-center gap-3 rounded-full bg-cv-yellow text-2xl font-bold text-black active:scale-[0.97]"
+            >
+              <ResetIcon size={28} />
+              TRY AGAIN
+            </button>
+          </div>
         </div>
       )}
     </main>

@@ -13,10 +13,10 @@ import dynamic from "next/dynamic";
 
 function LoadingScreen() {
   return (
-    <main className="flex h-dvh flex-col items-center justify-center gap-6 bg-black p-6 text-center">
-      <h1 className="text-5xl font-bold text-cv-yellow">ColorVision</h1>
-      <p className="text-3xl font-bold text-white" role="status">
-        📷 STARTING CAMERA…
+    <main className="flex h-dvh flex-col items-center justify-center gap-4 bg-black p-6 text-center">
+      <h1 className="text-5xl font-bold tracking-tight text-cv-yellow">ColorVision</h1>
+      <p className="text-2xl font-bold text-white/85" role="status">
+        Starting camera…
       </p>
     </main>
   );
