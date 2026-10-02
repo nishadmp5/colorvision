@@ -370,8 +370,6 @@ interface LabelRequest {
   force: boolean;
 }
 
-const CLOTH_BADGE_STYLE: BadgeStyle = { bg: COLORS.white, fg: COLORS.black, border: COLORS.black, fontPx: 20 };
-
 /** A spool label filled with its band color; text is black or white, whichever reads better. */
 function bandBadgeStyle(d: Detection): BadgeStyle {
   const bg = MATCH_BAND_COLORS[d.band];
@@ -563,58 +561,26 @@ function drawDetectionBox(ctx: CanvasRenderingContext2D, d: Detection, r: Screen
   ctx.stroke();
 }
 
-const CLOTH_RING_RADIUS = 26;
-
-/** Draw the cloth target: a black/white double ring (visible on any color) with a center dot. */
-function drawClothRing(ctx: CanvasRenderingContext2D, cx: number, cy: number): void {
-  ctx.setLineDash([]);
-  ctx.lineWidth = 9;
-  ctx.strokeStyle = COLORS.black;
-  ctx.beginPath();
-  ctx.arc(cx, cy, CLOTH_RING_RADIUS, 0, Math.PI * 2);
-  ctx.stroke();
-  ctx.lineWidth = 4;
-  ctx.strokeStyle = COLORS.white;
-  ctx.stroke();
-
-  ctx.fillStyle = COLORS.white;
-  ctx.strokeStyle = COLORS.black;
-  ctx.lineWidth = 2;
-  ctx.beginPath();
-  ctx.arc(cx, cy, 5, 0, Math.PI * 2);
-  ctx.fill();
-  ctx.stroke();
-}
-
 /**
- * Paint the whole overlay: boxes and ring first, then labels. Label
- * priority is the closest spool › CLOTH › the other spools by score. Labels
- * are painted in reverse priority, so the most important one ends up on top.
+ * Paint the whole overlay: boxes first, then labels. Label priority is by
+ * score; labels are painted in reverse priority, so the closest thread's
+ * label ends up on top.
+ *
+ * The cloth itself isn't marked: once it's locked, the tap ripple and the
+ * "CLOTH LOCKED" status with its color swatch are the confirmation, and the
+ * camera view stays clear for the threads.
  */
 function paintOverlay(
   ctx: CanvasRenderingContext2D,
   items: { d: Detection; rect: ScreenRect }[],
-  cloth: { x: number; y: number } | null,
   bounds: DrawBounds,
   font: string,
 ): void {
   for (const { d, rect } of items) drawDetectionBox(ctx, d, rect);
-  if (cloth) drawClothRing(ctx, cloth.x, cloth.y);
 
   const requests: LabelRequest[] = [...items]
     .sort((a, b) => b.d.score - a.d.score)
     .map(({ d, rect }) => ({ anchor: rect, variants: badgeVariants(d), force: true }));
-
-  if (cloth) {
-    const r = CLOTH_RING_RADIUS + 4;
-    const clothLabel: LabelRequest = {
-      anchor: { x: cloth.x - r, y: cloth.y - r, w: r * 2, h: r * 2 },
-      variants: [{ lines: ["CLOTH"], style: CLOTH_BADGE_STYLE }],
-      force: false,
-    };
-    // Right after the closest spool (if any).
-    requests.splice(Math.min(1, requests.length), 0, clothLabel);
-  }
 
   const labels = layoutLabels(ctx, requests, items.map((i) => i.rect), bounds, font);
   for (let i = labels.length - 1; i >= 0; i--) paintBadge(ctx, labels[i].rect, labels[i].spec, font);
@@ -814,12 +780,7 @@ export default function CameraScanner() {
         d,
         rect: { x: d.x * k + t.dx, y: d.y * k + t.dy, w: d.width * k, h: d.height * k },
       }));
-      const cloth = clothRef.current;
-      const clothPoint = cloth
-        ? { x: cloth.u * vw * t.scale + t.dx, y: cloth.v * vh * t.scale + t.dy }
-        : null;
-
-      paintOverlay(ctx, items, clothPoint, bounds, fontFamilyRef.current);
+      paintOverlay(ctx, items, bounds, fontFamilyRef.current);
     },
     [],
   );
