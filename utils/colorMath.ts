@@ -63,8 +63,8 @@ const POW25_7 = 25 ** 7;
 /** Minimum score (%) for "BEST MATCH": ΔE₀₀ ≤ ~2.9, a barely noticeable difference. */
 export const BEST_MATCH_MIN_SCORE = 75;
 
-/** Minimum score (%) for "GOOD MATCH": ΔE₀₀ ≤ ~6, a small, acceptable difference for thread. */
-export const GOOD_MATCH_MIN_SCORE = 55;
+/** Minimum score (%) for a match (✓): ΔE₀₀ ≤ ~6.9, a small, acceptable difference for thread. */
+export const GOOD_MATCH_MIN_SCORE = 50;
 
 /* -------------------------------------------------------------------------- */
 /*                              Helper functions                              */
@@ -225,17 +225,70 @@ export function deltaE2000(lab1: Lab, lab2: Lab, kL = 1, kC = 1, kH = 1): number
 /**
  * Turn a ΔE₀₀ distance into an easy-to-say percentage:
  *   score = 100 · e^(−0.1 · ΔE₀₀)
- * ΔE 0 → 100 %, ΔE 1 → 90 %, ΔE 3 → 74 %, ΔE 6 → 55 %, ΔE 10 → 37 %.
+ * ΔE 0 → 100 %, ΔE 1 → 90 %, ΔE 3 → 74 %, ΔE 6.9 → 50 %, ΔE 10 → 37 %.
  */
 export function matchScore(deltaE: number): number {
   return 100 * Math.exp(-0.1 * Math.max(0, deltaE));
 }
 
-/** Classify a score (%) into the three user-facing match levels. */
+/**
+ * Classify a score (%) into the three user-facing match levels.
+ * It uses the rounded score (the number shown on screen and spoken), so a
+ * spool labelled "50%" is always a match, never ✗.
+ */
 export function classifyMatch(score: number): MatchLevel {
-  if (score >= BEST_MATCH_MIN_SCORE) return "best";
-  if (score >= GOOD_MATCH_MIN_SCORE) return "good";
+  const shown = Math.round(score);
+  if (shown >= BEST_MATCH_MIN_SCORE) return "best";
+  if (shown >= GOOD_MATCH_MIN_SCORE) return "good";
   return "none";
+}
+
+/* -------------------------------------------------------------------------- */
+/*                                 Match bands                                */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * Indicator colors for the ten 10%-wide match bands: 0–9 %, 10–19 %, …,
+ * 90–100 %. They follow the "viridis" scale (dark purple → blue → green →
+ * bright yellow), which is designed to stay readable with color blindness:
+ * its lightness rises steadily, so a brighter indicator always means a
+ * closer match, even when the hues can't be told apart.
+ */
+export const MATCH_BAND_COLORS = [
+  "#440154", // 0–9 %
+  "#482878", // 10–19 %
+  "#3E4989", // 20–29 %
+  "#31688E", // 30–39 %
+  "#26828E", // 40–49 %
+  "#1F9E89", // 50–59 %
+  "#35B779", // 60–69 %
+  "#6ECE58", // 70–79 %
+  "#B5DE2B", // 80–89 %
+  "#FDE725", // 90–100 %
+] as const;
+
+/**
+ * Band index 0–9 for a score: 0 = 0–9 %, … 9 = 90–100 %. It uses the rounded
+ * score (the number shown on screen), so "90%" is always in the top band.
+ */
+export function matchBand(score: number): number {
+  return Math.min(9, Math.max(0, Math.floor(Math.round(score) / 10)));
+}
+
+/** Human-readable range of a band, e.g. "70–79%" or "90–100%". */
+export function matchBandLabel(band: number): string {
+  return band >= 9 ? "90–100%" : `${band * 10}–${band * 10 + 9}%`;
+}
+
+/** Black or white, whichever has more contrast on the given `#RRGGBB` color. */
+export function readableTextColor(hex: string): "#000000" | "#FFFFFF" {
+  const n = parseInt(hex.slice(1), 16);
+  const lum =
+    0.2126 * srgbToLinear((n >> 16) & 255) +
+    0.7152 * srgbToLinear((n >> 8) & 255) +
+    0.0722 * srgbToLinear(n & 255);
+  // Equal contrast against black and white happens at luminance ≈ 0.179.
+  return lum > 0.179 ? "#000000" : "#FFFFFF";
 }
 
 /** Format a Lab color as a CSS `rgb()` string (used for the cloth swatch). */

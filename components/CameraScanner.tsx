@@ -36,7 +36,14 @@ import {
   type KeyboardEvent,
   type PointerEvent,
 } from "react";
-import { labToCssRgb, type Lab, type MatchLevel } from "@/utils/colorMath";
+import {
+  MATCH_BAND_COLORS,
+  labToCssRgb,
+  matchBandLabel,
+  readableTextColor,
+  type Lab,
+  type MatchLevel,
+} from "@/utils/colorMath";
 import {
   HAPTIC_BEST_MATCH,
   HAPTIC_NO_MATCH,
@@ -116,6 +123,8 @@ type SummaryLevel = MatchLevel | "idle" | "searching";
 /** Banner text, speech text and a de-duplication key for announcements. */
 interface Summary {
   level: SummaryLevel;
+  /** Match band of the closest spool (sets the banner color); null before results. */
+  band: number | null;
   text: string;
   speech: string | null;
   key: string;
@@ -208,35 +217,22 @@ function stopStream(stream: MediaStream | null): void {
 /** Build the banner text, spoken text and announcement key for a frame. */
 function summarize(detections: Detection[], hasCloth: boolean): Summary {
   if (!hasCloth) {
-    return { level: "idle", text: "👆 POINT AT THE CLOTH AND TAP IT", speech: null, key: "idle" };
+    return { level: "idle", band: null, text: "👆 POINT AT THE CLOTH AND TAP IT", speech: null, key: "idle" };
   }
   if (detections.length === 0) {
-    return { level: "searching", text: "🧵 NOW SHOW THE THREAD SPOOLS", speech: null, key: "empty" };
+    return { level: "searching", band: null, text: "🧵 NOW SHOW THE THREAD SPOOLS", speech: null, key: "empty" };
   }
 
-  const top = detections.reduce((a, b) => (b.score > a.score ? b : a));
+  const top = detections.find((d) => d.isTop) ?? detections[0];
   const pct = Math.round(top.score);
-  if (top.level === "best") {
-    return {
-      level: "best",
-      text: `★ BEST MATCH: SPOOL ${top.spool} — ${pct}%`,
-      speech: `Best match found! Spool ${top.spool} is a ${pct}% match.`,
-      key: `best:${top.spool}`,
-    };
-  }
-  if (top.level === "good") {
-    return {
-      level: "good",
-      text: `✓ GOOD MATCH: SPOOL ${top.spool} — ${pct}%`,
-      speech: `Good match. Spool ${top.spool} is a ${pct}% match.`,
-      key: `good:${top.spool}`,
-    };
-  }
   return {
-    level: "none",
-    text: "✗ NO MATCH — TRY OTHER SPOOLS",
-    speech: "No match. Try other spools.",
-    key: "none",
+    // The level only picks the vibration pattern (best / no match).
+    level: top.level,
+    band: top.band,
+    text: `★ CLOSEST: SPOOL ${top.spool} — ${pct}%`,
+    speech: `Spool ${top.spool} is the closest match: ${pct} percent.`,
+    // Re-announce when the closest spool changes or moves to another 10% band.
+    key: `top:${top.spool}:${top.band}`,
   };
 }
 
@@ -302,38 +298,32 @@ interface LabelRequest {
   force: boolean;
 }
 
-const BADGE_STYLES = {
-  best: { bg: COLORS.yellow, fg: COLORS.black, border: COLORS.black, fontPx: 24 },
-  good: { bg: COLORS.black, fg: COLORS.yellow, border: COLORS.yellow, fontPx: 22 },
-  none: { bg: "rgba(0,0,0,0.8)", fg: COLORS.white, border: COLORS.gray, fontPx: 18 },
-  cloth: { bg: COLORS.white, fg: COLORS.black, border: COLORS.black, fontPx: 20 },
-} as const satisfies Record<MatchLevel | "cloth", BadgeStyle>;
+const CLOTH_BADGE_STYLE: BadgeStyle = { bg: COLORS.white, fg: COLORS.black, border: COLORS.black, fontPx: 20 };
+
+/** A spool label filled with its band color; text is black or white, whichever reads better. */
+function bandBadgeStyle(d: Detection): BadgeStyle {
+  const bg = MATCH_BAND_COLORS[d.band];
+  const fg = readableTextColor(bg);
+  return { bg, fg, border: fg === COLORS.black ? COLORS.black : COLORS.white, fontPx: d.isTop ? 28 : 26 };
+}
 
 const BADGE_PAD_X = 10;
 const BADGE_PAD_Y = 6;
 const BADGE_GAP = 6;
 
 /**
- * Label wording for each level, longest first. Every variant keeps the icon,
- * so status never depends on color. A NO MATCH label may shrink to "✗ 3"
- * when spools stand close together; the box style still marks it.
+ * Label wording for each spool, longest first. The match percentage is the
+ * main information; the fill color shows its 10% band. The closest spool also
+ * gets a ★. When spools stand close together the label shrinks to the
+ * percentage alone.
  */
 function badgeVariants(d: Detection): BadgeSpec[] {
-  const pct = `${Math.round(d.score)}%`;
-  switch (d.level) {
-    case "best":
-      return [{ lines: [`★ BEST MATCH ${pct}`, `SPOOL ${d.spool}`], style: BADGE_STYLES.best }];
-    case "good":
-      return [
-        { lines: [`✓ GOOD MATCH ${pct}`, `SPOOL ${d.spool}`], style: BADGE_STYLES.good },
-        { lines: [`✓ GOOD ${pct}`, `SPOOL ${d.spool}`], style: BADGE_STYLES.good },
-      ];
-    case "none":
-      return [
-        { lines: ["✗ NO MATCH", `SPOOL ${d.spool}`], style: BADGE_STYLES.none },
-        { lines: [`✗ ${d.spool}`], style: BADGE_STYLES.none },
-      ];
-  }
+  const pct = `${d.isTop ? "★ " : ""}${Math.round(d.score)}%`;
+  const style = bandBadgeStyle(d);
+  return [
+    { lines: [pct, `SPOOL ${d.spool}`], style },
+    { lines: [pct], style },
+  ];
 }
 
 function measureBadge(ctx: CanvasRenderingContext2D, spec: BadgeSpec, font: string) {
@@ -364,16 +354,38 @@ function paintBadge(ctx: CanvasRenderingContext2D, r: ScreenRect, spec: BadgeSpe
 const overlaps = (a: ScreenRect, b: ScreenRect, margin = 4): boolean =>
   a.x < b.x + b.w + margin && b.x < a.x + a.w + margin && a.y < b.y + b.h + margin && b.y < a.y + a.h + margin;
 
+/** Size of the area two rectangles share (0 when they don't touch). */
+const overlapArea = (a: ScreenRect, b: ScreenRect): number =>
+  Math.max(0, Math.min(a.x + a.w, b.x + b.w) - Math.max(a.x, b.x)) *
+  Math.max(0, Math.min(a.y + a.h, b.y + b.h) - Math.max(a.y, b.y));
+
+/** Candidate top-left corners for a w×h label next to its box, in order of preference. */
+function labelSpots(a: ScreenRect, w: number, h: number): [number, number][] {
+  const centerX = a.x + a.w / 2 - w / 2;
+  return [
+    [a.x, a.y - h - BADGE_GAP], // above, left-aligned
+    [centerX, a.y - h - BADGE_GAP], // above, centered
+    [a.x, a.y + a.h + BADGE_GAP], // below, left-aligned
+    [centerX, a.y + a.h + BADGE_GAP], // below, centered
+    [a.x + 4, a.y + 4], // inside, top
+    [centerX, a.y + a.h / 2 - h / 2], // inside, middle
+    [centerX, a.y + a.h - h - 4], // inside, bottom
+  ];
+}
+
 /**
  * Greedy label layout. Requests are handled in priority order. Each one
  * tries its wording variants × positions (above, below, then inside its
- * box), clamped to the visible area, and takes the first spot that doesn't
- * overlap an already placed label. A `force`d label (the BEST match) is
- * always shown, even when it has to overlap.
+ * box), clamped to the visible area, and takes the first spot that covers
+ * neither a placed label nor another spool's box (then, failing that, the
+ * first spot that only avoids labels). A `force`d label (every spool's
+ * percentage) is always shown: if no spot is free, it takes its most compact
+ * wording at the spot that covers the least of the other labels.
  */
 function layoutLabels(
   ctx: CanvasRenderingContext2D,
   requests: LabelRequest[],
+  obstacles: ScreenRect[],
   bounds: DrawBounds,
   font: string,
 ): { rect: ScreenRect; spec: BadgeSpec }[] {
@@ -390,31 +402,40 @@ function layoutLabels(
     const a = req.anchor;
     let chosen: { rect: ScreenRect; spec: BadgeSpec } | null = null;
 
-    for (const spec of req.variants) {
-      const { w, h } = measureBadge(ctx, spec, font);
-      const centerX = a.x + a.w / 2 - w / 2;
-      const spots: [number, number][] = [
-        [a.x, a.y - h - BADGE_GAP], // above, left-aligned
-        [centerX, a.y - h - BADGE_GAP], // above, centered
-        [a.x, a.y + a.h + BADGE_GAP], // below, left-aligned
-        [centerX, a.y + a.h + BADGE_GAP], // below, centered
-        [a.x + 4, a.y + 4], // inside, top
-        [centerX, a.y + a.h / 2 - h / 2], // inside, middle
-      ];
-      for (const [x, y] of spots) {
-        const rect = clamp(x, y, w, h);
-        if (!placed.some((p) => overlaps(p.rect, rect))) {
-          chosen = { rect, spec };
-          break;
+    // Pass 1 keeps clear of other labels AND other spools' boxes, so no
+    // spool gets hidden behind a neighbour's label. Pass 2 only avoids labels.
+    for (const avoidBoxes of [true, false]) {
+      for (const spec of req.variants) {
+        const { w, h } = measureBadge(ctx, spec, font);
+        for (const [x, y] of labelSpots(a, w, h)) {
+          const rect = clamp(x, y, w, h);
+          const blocked =
+            placed.some((p) => overlaps(p.rect, rect)) ||
+            (avoidBoxes && obstacles.some((o) => o !== a && overlaps(o, rect, 0)));
+          if (!blocked) {
+            chosen = { rect, spec };
+            break;
+          }
         }
+        if (chosen) break;
       }
       if (chosen) break;
     }
 
+    // No free spot: use the most compact wording at the position that
+    // covers the least of the labels already placed.
     if (!chosen && req.force) {
-      const spec = req.variants[0];
+      const spec = req.variants[req.variants.length - 1];
       const { w, h } = measureBadge(ctx, spec, font);
-      chosen = { rect: clamp(a.x, a.y - h - BADGE_GAP, w, h), spec };
+      let leastCovered = Infinity;
+      for (const [x, y] of labelSpots(a, w, h)) {
+        const rect = clamp(x, y, w, h);
+        const covered = placed.reduce((sum, p) => sum + overlapArea(p.rect, rect), 0);
+        if (covered < leastCovered) {
+          leastCovered = covered;
+          chosen = { rect, spec };
+        }
+      }
     }
     if (chosen) placed.push(chosen);
   }
@@ -422,28 +443,23 @@ function layoutLabels(
 }
 
 /**
- * Draw one detection box. Each level has a distinct line style, so the
- * meaning never depends on telling colors apart:
- *   BEST → thick SOLID green, GOOD → DASHED yellow, NONE → THIN gray.
- * A black underlay keeps every line visible on any background.
+ * Draw one detection box in its band color. The line also gets thicker with
+ * every band (3 px at 0–9 % up to 12 px at 90–100 %), so a closer match
+ * stands out even for someone who can't tell the colors apart. An outline in
+ * black (light colors) or white (dark colors) keeps it visible on any background.
  */
-function drawDetectionBox(ctx: CanvasRenderingContext2D, level: MatchLevel, r: ScreenRect): void {
-  const [color, width, dash] =
-    level === "best"
-      ? [COLORS.green, 8, []]
-      : level === "good"
-        ? [COLORS.yellow, 6, [18, 12]]
-        : [COLORS.gray, 3, []];
+function drawDetectionBox(ctx: CanvasRenderingContext2D, d: Detection, r: ScreenRect): void {
+  const color = MATCH_BAND_COLORS[d.band];
+  const width = 3 + d.band;
+  const outline = readableTextColor(color) === COLORS.black ? COLORS.black : COLORS.white;
 
   ctx.setLineDash([]);
-  ctx.strokeStyle = COLORS.black;
+  ctx.strokeStyle = outline;
   ctx.lineWidth = width + 4;
   ctx.strokeRect(r.x, r.y, r.w, r.h);
-  ctx.setLineDash(dash);
   ctx.strokeStyle = color;
   ctx.lineWidth = width;
   ctx.strokeRect(r.x, r.y, r.w, r.h);
-  ctx.setLineDash([]);
 }
 
 const CLOTH_RING_RADIUS = 26;
@@ -471,8 +487,8 @@ function drawClothRing(ctx: CanvasRenderingContext2D, cx: number, cy: number): v
 
 /**
  * Paint the whole overlay: boxes and ring first, then labels. Label
- * priority is BEST › CLOTH › GOOD (by score) › NO MATCH. Labels are painted
- * in reverse priority, so the most important one ends up on top.
+ * priority is the closest spool › CLOTH › the other spools by score. Labels
+ * are painted in reverse priority, so the most important one ends up on top.
  */
 function paintOverlay(
   ctx: CanvasRenderingContext2D,
@@ -481,26 +497,25 @@ function paintOverlay(
   bounds: DrawBounds,
   font: string,
 ): void {
-  for (const { d, rect } of items) drawDetectionBox(ctx, d.level, rect);
+  for (const { d, rect } of items) drawDetectionBox(ctx, d, rect);
   if (cloth) drawClothRing(ctx, cloth.x, cloth.y);
 
-  const rank: Record<MatchLevel, number> = { best: 0, good: 1, none: 2 };
   const requests: LabelRequest[] = [...items]
-    .sort((a, b) => rank[a.d.level] - rank[b.d.level] || b.d.score - a.d.score)
-    .map(({ d, rect }) => ({ anchor: rect, variants: badgeVariants(d), force: d.level === "best" }));
+    .sort((a, b) => b.d.score - a.d.score)
+    .map(({ d, rect }) => ({ anchor: rect, variants: badgeVariants(d), force: true }));
 
   if (cloth) {
     const r = CLOTH_RING_RADIUS + 4;
     const clothLabel: LabelRequest = {
       anchor: { x: cloth.x - r, y: cloth.y - r, w: r * 2, h: r * 2 },
-      variants: [{ lines: ["CLOTH"], style: BADGE_STYLES.cloth }],
+      variants: [{ lines: ["CLOTH"], style: CLOTH_BADGE_STYLE }],
       force: false,
     };
-    const afterBest = requests.length && items.some((i) => i.d.level === "best") ? 1 : 0;
-    requests.splice(afterBest, 0, clothLabel);
+    // Right after the closest spool (if any).
+    requests.splice(Math.min(1, requests.length), 0, clothLabel);
   }
 
-  const labels = layoutLabels(ctx, requests, bounds, font);
+  const labels = layoutLabels(ctx, requests, items.map((i) => i.rect), bounds, font);
   for (let i = labels.length - 1; i >= 0; i--) paintBadge(ctx, labels[i].rect, labels[i].spec, font);
 }
 
@@ -537,9 +552,9 @@ export default function CameraScanner() {
   const [voiceOn, setVoiceOn] = useState<boolean>(loadVoicePreference);
   const [clothCss, setClothCss] = useState<string | null>(null);
   const [ripples, setRipples] = useState<Ripple[]>([]);
-  const [summary, setSummary] = useState<Pick<Summary, "level" | "text">>(() => {
+  const [summary, setSummary] = useState<Pick<Summary, "level" | "band" | "text">>(() => {
     const s = summarize([], false);
-    return { level: s.level, text: s.text };
+    return { level: s.level, band: s.band, text: s.text };
   });
 
   useEffect(() => {
@@ -775,7 +790,9 @@ export default function CameraScanner() {
     drawOverlay(detections, vw, vh, pw);
 
     const s = summarize(detections, cloth !== null);
-    setSummary((prev) => (prev.text === s.text && prev.level === s.level ? prev : { level: s.level, text: s.text }));
+    setSummary((prev) =>
+      prev.text === s.text && prev.band === s.band ? prev : { level: s.level, band: s.band, text: s.text },
+    );
     announce(s);
   }, [announce, drawOverlay]);
 
@@ -867,13 +884,22 @@ export default function CameraScanner() {
 
   const locked = clothCss !== null;
 
-  const bannerStyles: Record<SummaryLevel, string> = {
-    idle: "border-cv-yellow bg-black text-cv-yellow",
-    searching: "border-white border-dashed bg-black text-white",
-    best: "border-black bg-cv-green text-black",
-    good: "border-cv-yellow border-dashed bg-black text-cv-yellow",
-    none: "border-cv-gray bg-black text-white",
-  };
+  // Before results the banner gives instructions; afterwards it takes the
+  // closest spool's band color (with black or white text for contrast).
+  const bannerClass =
+    summary.band !== null
+      ? ""
+      : summary.level === "idle"
+        ? "border-cv-yellow bg-black text-cv-yellow"
+        : "border-white border-dashed bg-black text-white";
+  const bannerStyle =
+    summary.band !== null
+      ? (() => {
+          const bg = MATCH_BAND_COLORS[summary.band];
+          const fg = readableTextColor(bg);
+          return { backgroundColor: bg, color: fg, borderColor: fg };
+        })()
+      : undefined;
 
   return (
     <main
@@ -963,7 +989,8 @@ export default function CameraScanner() {
 
         <p
           aria-live="polite"
-          className={`rounded-2xl border-4 px-4 py-3 text-center text-2xl font-bold leading-tight ${bannerStyles[summary.level]}`}
+          className={`rounded-2xl border-4 px-4 py-3 text-center text-2xl font-bold leading-tight ${bannerClass}`}
+          style={bannerStyle}
         >
           {summary.text}
         </p>
@@ -972,25 +999,46 @@ export default function CameraScanner() {
       {/* ---------------- Bottom bar: reset + voice ---------------- */}
       <footer
         ref={footerRef}
-        className="absolute inset-x-0 bottom-0 z-10 flex gap-3 bg-black/85 px-3 pt-3 pb-[max(0.75rem,env(safe-area-inset-bottom))]">
-        <button
-          type="button"
-          onClick={resetCloth}
-          className="min-h-[96px] flex-[3] rounded-2xl border-4 border-white bg-cv-yellow px-3 text-[26px] font-bold leading-tight text-black transition-transform active:scale-95"
+        className="absolute inset-x-0 bottom-0 z-10 flex flex-col gap-3 bg-black/85 px-3 pt-3 pb-[max(0.75rem,env(safe-area-inset-bottom))]">
+        {/* Color key for the ten 10% bands: dark = far from the cloth color, bright = close. */}
+        <div
+          className="flex items-center gap-2 text-lg font-bold text-white"
+          role="img"
+          aria-label="Color key: dark purple means 0 percent match, bright yellow means 100 percent match."
         >
-          ↺ RESET CLOTH COLOR
-        </button>
-        <button
-          type="button"
-          onClick={toggleVoice}
-          aria-pressed={voiceOn}
-          className={`flex min-h-[96px] flex-[2] flex-col items-center justify-center rounded-2xl border-4 border-white px-2 text-xl font-bold leading-tight transition-transform active:scale-95 ${
-            voiceOn ? "bg-white text-black" : "bg-black text-white"
-          }`}
-        >
-          <span>{voiceOn ? "🔊" : "🔇"} VOICE GUIDANCE</span>
-          <span className="text-lg">{voiceOn ? "ON" : "OFF"}</span>
-        </button>
+          <span>0%</span>
+          <div className="flex h-7 flex-1 overflow-hidden rounded-md border-2 border-white">
+            {MATCH_BAND_COLORS.map((color, band) => (
+              <span
+                key={color}
+                className="flex-1"
+                style={{ backgroundColor: color }}
+                title={matchBandLabel(band)}
+              />
+            ))}
+          </div>
+          <span>100%</span>
+        </div>
+        <div className="flex gap-3">
+          <button
+            type="button"
+            onClick={resetCloth}
+            className="min-h-[96px] flex-[3] rounded-2xl border-4 border-white bg-cv-yellow px-3 text-[26px] font-bold leading-tight text-black transition-transform active:scale-95"
+          >
+            ↺ RESET CLOTH COLOR
+          </button>
+          <button
+            type="button"
+            onClick={toggleVoice}
+            aria-pressed={voiceOn}
+            className={`flex min-h-[96px] flex-[2] flex-col items-center justify-center rounded-2xl border-4 border-white px-2 text-xl font-bold leading-tight transition-transform active:scale-95 ${
+              voiceOn ? "bg-white text-black" : "bg-black text-white"
+            }`}
+          >
+            <span>{voiceOn ? "🔊" : "🔇"} VOICE GUIDANCE</span>
+            <span className="text-lg">{voiceOn ? "ON" : "OFF"}</span>
+          </button>
+        </div>
       </footer>
 
       {/* ---------------- Camera starting / error screens ---------------- */}

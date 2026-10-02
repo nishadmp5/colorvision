@@ -22,6 +22,8 @@ export interface CvMat {
   rows: number;
   cols: number;
   data: Uint8Array;
+  /** Typed view for 32-bit signed integer Mats (e.g. a contour hierarchy). */
+  data32S: Int32Array;
   delete(): void;
   isDeleted(): boolean;
 }
@@ -102,6 +104,7 @@ export interface OpenCV {
   MORPH_RECT: number;
   MORPH_CLOSE: number;
   RETR_EXTERNAL: number;
+  RETR_TREE: number;
   CHAIN_APPROX_SIMPLE: number;
 }
 

@@ -17,6 +17,7 @@
 import {
   classifyMatch,
   deltaE2000,
+  matchBand,
   matchScore,
   rgbToLab,
   type Lab,
@@ -53,6 +54,10 @@ export interface Detection extends Region {
   /** 0–100 match percentage (100 · e^(−0.1·ΔE₀₀)). */
   score: number;
   level: MatchLevel;
+  /** 10%-wide match band, 0 (0–9 %) … 9 (90–100 %); picks the indicator color. */
+  band: number;
+  /** True for the single highest-scoring spool (marked with ★). */
+  isTop: boolean;
 }
 
 /** Tunable detector thresholds. The defaults were tuned on 360 px frames. */
@@ -168,7 +173,8 @@ export function sampleClothLab(
  *     catch objects that differ from the cloth only in hue, not brightness,
  *     which is exactly the case a color-blind user can't judge.
  *   → dilate + morphological close (join broken outlines)
- *   → external contours, filtered on area / aspect ratio / solidity
+ *   → contour tree, filtered on area / aspect ratio / solidity / frame edges
+ *     (outermost accepted contour wins; nested ones belong to it)
  *   → per-contour filled mask, eroded so the edge halo is skipped
  *   → median color of the masked pixels.
  *
@@ -218,11 +224,31 @@ export function detectRegionsOpenCv(
 
     const contours = own(new cv.MatVector());
     const hierarchy = own(new cv.Mat());
-    cv.findContours(edges, contours, hierarchy, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE);
+    // RETR_TREE (not just the outermost outlines): spools standing inside a
+    // larger outlined background region (e.g. a strip of table) must still be found.
+    cv.findContours(edges, contours, hierarchy, cv.RETR_TREE, cv.CHAIN_APPROX_SIMPLE);
 
     // --- Geometric filtering ---------------------------------------------
+    // hierarchy[i] = [next, previous, firstChild, parent]
+    const count = contours.size();
+    const parentOf = (i: number): number => hierarchy.data32S[i * 4 + 3];
+    // Judge outer contours before the ones nested in them.
+    const depth = new Int32Array(count);
+    for (let i = 0; i < count; i++) {
+      for (let p = parentOf(i); p >= 0; p = parentOf(p)) depth[i]++;
+    }
+    const order = Array.from({ length: count }, (_, i) => i).sort((a, b) => depth[a] - depth[b]);
+    // Once a contour is accepted, everything inside it (e.g. the inner edge
+    // of the same spool's outline) is part of that object, not a new spool.
+    const accepted = new Uint8Array(count);
+    const insideAccepted = (i: number): boolean => {
+      for (let p = parentOf(i); p >= 0; p = parentOf(p)) if (accepted[p]) return true;
+      return false;
+    };
+
     const candidates: { index: number; area: number; rect: Omit<Region, "rgb"> }[] = [];
-    for (let i = 0; i < contours.size(); i++) {
+    for (const i of order) {
+      if (insideAccepted(i)) continue;
       const contour = contours.get(i);
       let hull: CvMat | null = null;
       try {
@@ -234,6 +260,15 @@ export function detectRegionsOpenCv(
         const rect = cv.boundingRect(contour);
         const aspect = Math.max(rect.width, rect.height) / Math.max(1, Math.min(rect.width, rect.height));
         if (aspect > options.maxAspect) continue;
+
+        // A region reaching two or more frame edges is background (table,
+        // cloth, wall), not an object standing in view.
+        const edgesTouched =
+          Number(rect.x <= 1) +
+          Number(rect.y <= 1) +
+          Number(rect.x + rect.width >= w - 1) +
+          Number(rect.y + rect.height >= h - 1);
+        if (edgesTouched >= 2) continue;
 
         hull = new cv.Mat();
         cv.convexHull(contour, hull);
@@ -251,6 +286,7 @@ export function detectRegionsOpenCv(
           continue;
         }
 
+        accepted[i] = 1;
         candidates.push({
           index: i,
           area,
@@ -480,29 +516,55 @@ export function detectRegionsCanvas(
 /* -------------------------------------------------------------------------- */
 
 /**
+ * Sort regions top row first, left to right within a row. A region joins
+ * the current row when its vertical center lies within half the row's
+ * height, so small camera shake doesn't swap the order.
+ */
+function readingOrder(regions: Region[]): Region[] {
+  const byTop = [...regions].sort((a, b) => a.y + a.height / 2 - (b.y + b.height / 2));
+  const rows: Region[][] = [];
+  for (const r of byTop) {
+    const row = rows[rows.length - 1];
+    const first = row?.[0];
+    if (first && Math.abs(r.y + r.height / 2 - (first.y + first.height / 2)) < first.height / 2) row.push(r);
+    else rows.push([r]);
+  }
+  return rows.flatMap((row) => row.sort((a, b) => a.x + a.width / 2 - (b.x + b.width / 2)));
+}
+
+/**
  * Score regions against the cloth color and assign spool numbers.
  *
- * - Spools are numbered **left to right** (by box center), so "Spool 1"
- *   means the same physical spool from one frame to the next.
+ * - Spools are numbered in **reading order** (top row left to right, then
+ *   the next row), so "Spool 1" means the same physical spool from one
+ *   frame to the next, even when spools stand in several rows.
  * - Only the single highest-scoring spool can be BEST. Other spools above
  *   the BEST threshold are shown as GOOD, so there's never more than one
  *   star on screen.
  */
 export function rankRegions(regions: Region[], clothLab: Lab): Detection[] {
-  const detections: Detection[] = regions
-    .slice()
-    .sort((a, b) => a.x + a.width / 2 - (b.x + b.width / 2))
+  const detections: Detection[] = readingOrder(regions)
     .map((region, i) => {
       const lab = rgbToLab(region.rgb);
       const deltaE = deltaE2000(clothLab, lab);
       const score = matchScore(deltaE);
-      return { ...region, spool: i + 1, lab, deltaE, score, level: classifyMatch(score) };
+      return {
+        ...region,
+        spool: i + 1,
+        lab,
+        deltaE,
+        score,
+        level: classifyMatch(score),
+        band: matchBand(score),
+        isTop: false,
+      };
     });
 
   const top = detections.reduce<Detection | null>(
     (best, d) => (!best || d.score > best.score ? d : best),
     null,
   );
+  if (top) top.isTop = true;
   for (const d of detections) {
     if (d.level === "best" && d !== top) d.level = "good";
   }
