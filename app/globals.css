@@ -1,26 +1,97 @@
 @import "tailwindcss";
 
+/*
+ * ColorVision design tokens.
+ *
+ * The palette is deliberately tiny and high-contrast. It is designed for an
+ * elderly user with color-vision deficiency, so color is never the only
+ * signal: every status is also shown with an icon, a border style and text.
+ */
 :root {
-  --background: #ffffff;
-  --foreground: #171717;
+  --cv-black: #000000;
+  --cv-white: #ffffff;
+  --cv-yellow: #ffd700; /* high-luminance yellow: focus, warnings, "good" */
+  --cv-green: #00ff00; /* bright green: "best match" */
+  --cv-red: #ff0000; /* signal red: errors */
+  --cv-gray: #8a8a8a; /* muted gray: "no match" */
 }
 
+/* Expose the tokens to Tailwind as `bg-cv-yellow`, `text-cv-green`, etc. */
 @theme inline {
-  --color-background: var(--background);
-  --color-foreground: var(--foreground);
-  --font-sans: var(--font-geist-sans);
-  --font-mono: var(--font-geist-mono);
+  --color-cv-black: var(--cv-black);
+  --color-cv-white: var(--cv-white);
+  --color-cv-yellow: var(--cv-yellow);
+  --color-cv-green: var(--cv-green);
+  --color-cv-red: var(--cv-red);
+  --color-cv-gray: var(--cv-gray);
+  --font-sans: var(--font-atkinson), system-ui, sans-serif;
 }
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
+/*
+ * The app is always dark: a black frame around the camera view gives the
+ * highest contrast for the white/yellow controls. No light theme on purpose.
+ */
+html,
+body {
+  height: 100%;
+  background: var(--cv-black);
+  color: var(--cv-white);
+  font-family: var(--font-sans);
+  /* Prevent the rubber-band scroll/pull-to-refresh from moving the camera. */
+  overscroll-behavior: none;
+}
+
+/*
+ * A thick, unmistakable focus ring for keyboard / switch-access users.
+ * Yellow on black has a contrast ratio of about 15:1.
+ */
+:focus-visible {
+  outline: 4px solid var(--cv-yellow);
+  outline-offset: 3px;
+}
+
+/*
+ * Tap ripple: confirms where the cloth was picked. A yellow ring with a
+ * black halo stays visible on any fabric color.
+ */
+.cv-ripple {
+  position: absolute;
+  z-index: 5;
+  width: 112px;
+  height: 112px;
+  border-radius: 9999px;
+  border: 6px solid var(--cv-yellow);
+  box-shadow:
+    0 0 0 4px var(--cv-black),
+    inset 0 0 0 4px var(--cv-black);
+  pointer-events: none;
+  animation: cv-ripple 700ms ease-out forwards;
+}
+
+@keyframes cv-ripple {
+  from {
+    transform: translate(-50%, -50%) scale(0.25);
+    opacity: 1;
+  }
+  to {
+    transform: translate(-50%, -50%) scale(1.6);
+    opacity: 0;
   }
 }
 
-body {
-  background: var(--background);
-  color: var(--foreground);
-  font-family: Arial, Helvetica, sans-serif;
+/* Reduced motion: no growing ring, just a brief fixed one that fades out. */
+@media (prefers-reduced-motion: reduce) {
+  .cv-ripple {
+    animation-name: cv-ripple-static;
+  }
+  @keyframes cv-ripple-static {
+    from {
+      transform: translate(-50%, -50%);
+      opacity: 1;
+    }
+    to {
+      transform: translate(-50%, -50%);
+      opacity: 0;
+    }
+  }
 }

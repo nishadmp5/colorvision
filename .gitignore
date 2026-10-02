@@ -39,3 +39,6 @@ yarn-error.log*
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+
+# OpenCV.js build (~10 MB), downloaded by scripts/fetch-opencv.mjs
+/public/opencv.js
